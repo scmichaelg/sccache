@@ -50,84 +50,24 @@ Table of Contents (ToC)
 
 ## Installation
 
-There are prebuilt x86-64 binaries available for Windows, Linux (a portable binary compiled against musl), and macOS [on the releases page](https://github.com/mozilla/sccache/releases/latest). Several package managers also include sccache packages, you can install the latest release from source using cargo, or build directly from a source checkout.
-
 ### macOS
 
-On macOS sccache can be installed via [Homebrew](https://brew.sh/):
+Install via [Homebrew](https://brew.sh/) using the SafetyCulture tap:
 
 ```bash
-brew install sccache
+brew tap scmichaelg/sccache
+brew install scmichaelg/sccache/sccache
 ```
 
-or via [MacPorts](https://www.macports.org/):
+### Linux
+
+Download the pre-built binary from the [releases page](https://github.com/scmichaelg/sccache/releases/latest):
 
 ```bash
-sudo port install sccache
-```
-
-### Windows
-
-On Windows, sccache can be installed via [scoop](https://scoop.sh/):
-
-```
-scoop install sccache
-```
-or `winget`:
-
-```
-winget install Mozilla.sccache
-```
-
-### Via cargo
-
-If you have a Rust toolchain installed you can install sccache using cargo. **Note that this will compile sccache from source which is fairly resource-intensive. For CI purposes you should use prebuilt binary packages.**
-
-
-```bash
-cargo install sccache --locked
-```
-
-### With Nix
-
-Sccache is available in nixpkgs, so if you don't need the latest version you can use that:
-
-```nix
-buildInputs = [ pkgs.sccache ];
-```
-
-We also provide a flake with an overlay for getting the latest version:
-
-```nix
-{
-  inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    sccache = {
-      url = "github:mozilla/sccache";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-  };
-
-  outputs = { self, nixpkgs, sccache, ... }:
-    let
-      system = "x86_64-linux";
-      pkgs = import nixpkgs {
-        inherit system;
-        overlays = [ sccache.overlays.default ];
-      };
-    in {
-      devShells.${system}.default = pkgs.mkShell {
-        buildInputs = [ pkgs.sccache ];
-      };
-    };
-}
-```
-
-Or use it directly from the flake without the overlay:
-
-```bash
-nix run github:mozilla/sccache -- --help
-nix shell github:mozilla/sccache
+SCCACHE_VERSION=0.14.1
+curl -LO "https://github.com/scmichaelg/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+tar xzf "sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+mv "sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" ~/.local/bin/
 ```
 
 ---
