@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
+
 use crate::cache::CacheMode;
 #[cfg(target_os = "windows")]
 use crate::util::normalize_win_path;
@@ -543,6 +545,20 @@ impl CacheConfigs {
     /// If no levels and multiple caches, returns error.
     pub fn get_cache_levels(self) -> Result<Vec<CacheType>> {
         if let Some(ml_config) = &self.multilevel {
+            // Validate chain length
+            if ml_config.chain.len() > 8 {
+                bail!(
+                    "Multi-level chain too long: max 8 levels, got {}",
+                    ml_config.chain.len()
+                );
+            }
+
+            // Validate no duplicate levels
+            let unique: HashSet<&str> = ml_config.chain.iter().map(|s| s.trim()).collect();
+            if unique.len() != ml_config.chain.len() {
+                bail!("Duplicate cache levels in multi-level chain");
+            }
+
             // Build caches in the order specified by multilevel chain
             let mut caches = Vec::new();
             for level_name in &ml_config.chain {

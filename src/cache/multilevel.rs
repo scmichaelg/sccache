@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io::Cursor;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
 
 #[cfg(any(
     feature = "azure",
@@ -31,6 +33,7 @@ use serde::{Deserialize, Serialize};
     feature = "cos"
 ))]
 use crate::cache::build_single_cache;
+use crate::cache::cache_io::CacheRead;
 use crate::cache::disk::DiskCache;
 use crate::cache::{Cache, CacheMode, CacheWrite, Storage};
 use crate::compiler::PreprocessorCacheEntry;
@@ -281,6 +284,9 @@ impl MultiLevelStats {
 ///
 /// Configure via SCCACHE_MULTILEVEL_CHAIN="disk,redis,s3" environment variable.
 /// See docs/MultiLevel.md for details.
+/// Maximum number of concurrent backfill tasks to prevent resource exhaustion.
+const MAX_BACKFILL_CONCURRENCY: usize = 32;
+
 pub struct MultiLevelStorage {
     levels: Vec<Arc<dyn Storage>>,
     write_policy: WritePolicy,
@@ -288,6 +294,8 @@ pub struct MultiLevelStorage {
     atomic_stats: Vec<Arc<AtomicLevelStats>>,
     /// Base directories for path normalization, propagated to compiler pipeline
     basedirs: Vec<Vec<u8>>,
+    /// Semaphore to bound concurrent backfill tasks
+    backfill_semaphore: Arc<Semaphore>,
 }
 
 impl MultiLevelStorage {
@@ -322,6 +330,7 @@ impl MultiLevelStorage {
             write_policy,
             atomic_stats,
             basedirs,
+            backfill_semaphore: Arc::new(Semaphore::new(MAX_BACKFILL_CONCURRENCY)),
         }
     }
 
@@ -576,50 +585,77 @@ impl Storage for MultiLevelStorage {
                         // Try to get raw bytes for backfilling
                         match level.get_raw(key).await {
                             Ok(Some(raw_bytes)) => {
-                                let raw_bytes = Arc::new(raw_bytes);
+                                // Validate data integrity before backfilling to faster levels.
+                                // This prevents corrupted entries in a slow tier from poisoning
+                                // the fast tier permanently.
+                                if CacheRead::from(Cursor::new(raw_bytes.clone())).is_err() {
+                                    warn!(
+                                        "Corrupt cache entry at level {} for key {}, skipping backfill",
+                                        hit_level, key
+                                    );
+                                } else {
+                                    let raw_bytes = Arc::new(raw_bytes);
 
-                                // Update backfill stats
-                                if let Some(stats) = self.atomic_stats.get(hit_level) {
-                                    stats
-                                        .backfills_from
-                                        .fetch_add(idx as u64, Ordering::Relaxed);
-                                }
+                                    // Update backfill stats
+                                    if let Some(stats) = self.atomic_stats.get(hit_level) {
+                                        stats
+                                            .backfills_from
+                                            .fetch_add(1, Ordering::Relaxed);
+                                    }
 
-                                // Spawn background backfill tasks for each faster level
-                                // Iterate slice directly instead of creating Vec
-                                for backfill_idx in 0..idx {
-                                    let key_bf = key_str.clone();
-                                    let bytes_bf = Arc::clone(&raw_bytes);
-                                    let level_bf = Arc::clone(&self.levels[backfill_idx]);
-                                    let stats_arc =
-                                        self.atomic_stats.get(backfill_idx).map(Arc::clone);
-
-                                    tokio::spawn(async move {
-                                        match Self::write_entry_from_bytes(
-                                            &level_bf, &key_bf, &bytes_bf,
-                                        )
-                                        .await
-                                        {
-                                            Ok(_) => {
-                                                trace!(
-                                                    "Backfilled cache level {} from level {}",
-                                                    backfill_idx, hit_level
+                                    // Spawn background backfill tasks for each faster level,
+                                    // bounded by semaphore to prevent resource exhaustion.
+                                    for backfill_idx in 0..idx {
+                                        let permit = match self.backfill_semaphore.clone().try_acquire_owned() {
+                                            Ok(permit) => permit,
+                                            Err(_) => {
+                                                debug!(
+                                                    "Backfill semaphore full, skipping backfill to level {}",
+                                                    backfill_idx
                                                 );
-                                                // Update backfill_to stats
-                                                if let Some(stats) = stats_arc {
-                                                    stats
-                                                        .backfills_to
-                                                        .fetch_add(1, Ordering::Relaxed);
+                                                continue;
+                                            }
+                                        };
+
+                                        let key_bf = key_str.clone();
+                                        let bytes_bf = Arc::clone(&raw_bytes);
+                                        let level_bf = Arc::clone(&self.levels[backfill_idx]);
+                                        let stats_arc =
+                                            self.atomic_stats.get(backfill_idx).map(Arc::clone);
+
+                                        tokio::spawn(async move {
+                                            let _permit = permit; // held until task completes
+                                            match Self::write_entry_from_bytes(
+                                                &level_bf, &key_bf, &bytes_bf,
+                                            )
+                                            .await
+                                            {
+                                                Ok(_) => {
+                                                    trace!(
+                                                        "Backfilled cache level {} from level {}",
+                                                        backfill_idx, hit_level
+                                                    );
+                                                    // Update backfill_to stats
+                                                    if let Some(stats) = stats_arc {
+                                                        stats
+                                                            .backfills_to
+                                                            .fetch_add(1, Ordering::Relaxed);
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    debug!(
+                                                        "Background backfill from level {} to level {} failed: {}",
+                                                        hit_level, backfill_idx, e
+                                                    );
+                                                    if let Some(stats) = stats_arc {
+                                                        stats
+                                                            .write_failures
+                                                            .fetch_add(1, Ordering::Relaxed);
+                                                    }
                                                 }
                                             }
-                                            Err(e) => {
-                                                debug!(
-                                                    "Background backfill from level {} to level {} failed: {}",
-                                                    hit_level, backfill_idx, e
-                                                );
-                                            }
-                                        }
-                                    });
+                                        });
+                                    }
                                 }
                             }
                             Ok(None) => {
@@ -684,11 +720,13 @@ impl Storage for MultiLevelStorage {
             }
 
             WritePolicy::L0 => {
-                // Fail only if L0 write fails (unless L0 is read-only)
+                // Fail if L0 write fails — including when L0 is read-only
                 if let Some(l0) = self.levels.first() {
-                    // Check if L0 is read-only before attempting write
                     if matches!(l0.check().await, Ok(CacheMode::ReadOnly)) {
-                        debug!("Level 0 is read-only, skipping L0 write");
+                        self.record_write_failure(0);
+                        return Err(anyhow!(
+                            "L0 is read-only but write_policy requires L0 writes"
+                        ));
                     } else {
                         // Attempt write and propagate errors
                         let start = Instant::now();

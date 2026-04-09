@@ -54,9 +54,10 @@ This creates a cache hierarchy where frequently accessed artifacts stay in fast 
 2. Check L1 (redis)   → Miss (10ms)
 3. Check L2 (s3)      → Hit! (200ms)
 4. Return to compiler wrapper / sccache (Total: 215ms)
-5. Background: Backfill L2→L1 (async, non-blocking)
-6. Background: Backfill L2→L0 (async, non-blocking)
-7. Next request: Check L0 → Hit! (10ms)
+5. Validate: Check integrity of L2 entry (ZIP structure)
+6. Background: Backfill L2→L1 (async, bounded concurrency)
+7. Background: Backfill L2→L0 (async, bounded concurrency)
+8. Next request: Check L0 → Hit! (10ms)
 ```
 
 ### Write Path
@@ -70,7 +71,7 @@ Compiler writes artifact
     └─> L2 (s3)    ✓
 ```
 
-If any level fails, the error is logged but the write succeeds if at least one level accepts it.
+Write behavior depends on the configured [write policy](#write-policy-configuration).
 
 ## Use Cases
 
@@ -166,7 +167,14 @@ Compilation succeeds only if all read-write levels succeed. Any write failure fa
 
 #### Read-Only Levels
 
-Any level configured as read-only (e.g., `SCCACHE_LOCAL_RW_MODE=READ_ONLY`) is automatically skipped during writes, regardless of write policy:
+Levels configured as read-only (e.g., `SCCACHE_LOCAL_RW_MODE=READ_ONLY`) are
+handled according to the write policy:
+
+- **`ignore`** — read-only levels are silently skipped.
+- **`l0`** — if L0 is read-only, the write **fails** (L0 must be writable).
+  L1+ read-only levels are skipped.
+- **`all`** — read-only levels are skipped; only read-write level failures
+  cause errors.
 
 ```bash
 export SCCACHE_MULTILEVEL_CHAIN="disk,redis"
@@ -174,6 +182,9 @@ export SCCACHE_MULTILEVEL_WRITE_POLICY="all"
 export SCCACHE_LOCAL_RW_MODE="READ_ONLY"  # Disk is read-only
 # Compilation succeeds if Redis write succeeds (disk is skipped)
 ```
+
+**Note**: With `l0` policy, a read-only L0 is treated as a configuration error
+since the policy's contract is to guarantee L0 writes.
 
 ### Complete Example
 
@@ -239,6 +250,23 @@ export SCCACHE_DIR="/tmp/cache"
 - **L0 (disk)**: Small, hot data (5-10GB)
 - **L1 (redis)**: Team shared, medium (50-100GB)
 - **L2 (s3)**: Unlimited, cold storage
+
+### 3. Chain Length Limits
+
+The maximum chain length is **8 levels**. Duplicate level names within a chain
+are not allowed. In practice, 2-3 levels cover most use cases.
+
+### 4. Backfill Safety
+
+Backfill operations include two safety mechanisms:
+
+- **Integrity validation**: Before copying data from a slower tier to a faster
+  tier, sccache validates the cache entry structure. Corrupt entries are
+  detected and skipped, preventing a bad remote entry from poisoning the local
+  disk cache.
+- **Concurrency limit**: Backfill tasks are bounded by a semaphore (max 32
+  concurrent operations). Under heavy parallel compilation, excess backfills
+  are skipped rather than queued, preventing resource exhaustion.
 
 ## See Also
 

@@ -800,9 +800,9 @@ fn test_storage_trait_methods() {
 
 #[test]
 fn test_all_levels_fail_on_put() {
-    // Test behavior when all storage levels fail on write
-    // In multi-level design, put() succeeds if ANY level succeeds
-    // Even if all fail, it should not panic
+    // Test behavior when all storage levels are read-only.
+    // With WritePolicy::Ignore, put() should succeed (best-effort, no panic).
+    // With WritePolicy::L0, put() should error because L0 is read-only.
     let runtime = RuntimeBuilder::new_multi_thread()
         .enable_all()
         .worker_threads(1)
@@ -813,19 +813,24 @@ fn test_all_levels_fail_on_put() {
     let cache_l0 = Arc::new(ReadOnlyStorage(Arc::new(InMemoryStorage::new())));
     let cache_l1 = Arc::new(ReadOnlyStorage(Arc::new(InMemoryStorage::new())));
 
-    let storage = MultiLevelStorage::new(vec![
-        cache_l0 as Arc<dyn Storage>,
-        cache_l1 as Arc<dyn Storage>,
-    ]);
+    let storage = MultiLevelStorage::with_write_policy(
+        vec![
+            cache_l0 as Arc<dyn Storage>,
+            cache_l1 as Arc<dyn Storage>,
+        ],
+        WritePolicy::Ignore,
+    );
 
     runtime.block_on(async {
         let entry = CacheWrite::new();
 
-        // put() should complete without panic even when all levels fail
-        // (writes to L0 are synchronous, L1+ are async background)
+        // WritePolicy::Ignore should complete without panic even when all levels fail
         let result = storage.put("fail_key", entry).await;
 
-        assert!(result.is_ok(), "Put should succeed with read-only levels");
+        assert!(
+            result.is_ok(),
+            "WritePolicy::Ignore should succeed with read-only levels"
+        );
     });
 }
 
@@ -1335,5 +1340,239 @@ fn test_put_mode_all_skips_readonly() {
             cache_l2.get("test_key").await.unwrap(),
             Cache::Hit(_)
         ));
+    });
+}
+
+// ===== Stats accuracy tests (regression tests for bug fixes) =====
+
+#[test]
+fn test_backfill_from_counter_increments_by_one() {
+    // Regression test for bug where backfills_from was incremented by level index
+    // instead of 1, causing inflated counters (e.g., L2 hit added 2 instead of 1).
+    let runtime = RuntimeBuilder::new_multi_thread()
+        .enable_all()
+        .worker_threads(2)
+        .build()
+        .unwrap();
+
+    let cache_l0 = Arc::new(InMemoryStorage::new());
+    let cache_l1 = Arc::new(InMemoryStorage::new());
+    let cache_l2 = Arc::new(InMemoryStorage::new());
+
+    let storage = MultiLevelStorage::new(vec![
+        cache_l0.clone() as Arc<dyn Storage>,
+        cache_l1.clone() as Arc<dyn Storage>,
+        cache_l2.clone() as Arc<dyn Storage>,
+    ]);
+
+    runtime.block_on(async {
+        // Store an entry directly in L2 (simulating a remote cache hit)
+        let entry = CacheWrite::new();
+        cache_l2.put("key_a", entry).await.unwrap();
+
+        let entry2 = CacheWrite::new();
+        cache_l2.put("key_b", entry2).await.unwrap();
+
+        // Trigger two cache gets that hit at L2 (index 2)
+        let result_a = storage.get("key_a").await.unwrap();
+        assert!(matches!(result_a, Cache::Hit(_)));
+
+        let result_b = storage.get("key_b").await.unwrap();
+        assert!(matches!(result_b, Cache::Hit(_)));
+
+        // Wait for async backfill tasks
+        sleep(Duration::from_millis(300)).await;
+
+        let stats = storage.stats();
+        // L2 (index 2) should have backfills_from = 2 (one per hit, NOT 2+2=4)
+        assert_eq!(
+            stats.levels[2].backfills_from, 2,
+            "backfills_from should increment by 1 per event, not by level index"
+        );
+        // L2 should have 2 hits
+        assert_eq!(stats.levels[2].hits, 2);
+        // L0 and L1 should have been backfilled to (2 keys x 2 levels = 4 total)
+        let total_backfills_to: u64 = stats.levels.iter().map(|l| l.backfills_to).sum();
+        assert_eq!(
+            total_backfills_to, 4,
+            "each L2 hit should backfill to both L0 and L1"
+        );
+    });
+}
+
+#[test]
+fn test_hit_miss_counters_accuracy() {
+    let runtime = RuntimeBuilder::new_multi_thread()
+        .enable_all()
+        .worker_threads(1)
+        .build()
+        .unwrap();
+
+    let cache_l0 = Arc::new(InMemoryStorage::new());
+    let cache_l1 = Arc::new(InMemoryStorage::new());
+
+    let storage = MultiLevelStorage::new(vec![
+        cache_l0.clone() as Arc<dyn Storage>,
+        cache_l1.clone() as Arc<dyn Storage>,
+    ]);
+
+    runtime.block_on(async {
+        // Store entry in L0 only
+        let entry = CacheWrite::new();
+        cache_l0.put("l0_key", entry).await.unwrap();
+
+        // Store entry in L1 only
+        let entry = CacheWrite::new();
+        cache_l1.put("l1_key", entry).await.unwrap();
+
+        // Hit at L0 — L0 gets 1 hit, L1 not checked
+        let result = storage.get("l0_key").await.unwrap();
+        assert!(matches!(result, Cache::Hit(_)));
+
+        // Hit at L1 — L0 gets 1 miss, L1 gets 1 hit
+        let result = storage.get("l1_key").await.unwrap();
+        assert!(matches!(result, Cache::Hit(_)));
+
+        // Total miss — both levels get 1 miss each
+        let result = storage.get("missing_key").await.unwrap();
+        assert!(matches!(result, Cache::Miss));
+
+        let stats = storage.stats();
+
+        // L0: 1 hit (l0_key) + 1 miss (l1_key) + 1 miss (missing_key) = 1 hit, 2 misses
+        assert_eq!(stats.levels[0].hits, 1, "L0 should have 1 hit");
+        assert_eq!(stats.levels[0].misses, 2, "L0 should have 2 misses");
+
+        // L1: 1 hit (l1_key) + 1 miss (missing_key) = 1 hit, 1 miss
+        // Note: L1 is not checked when L0 hits
+        assert_eq!(stats.levels[1].hits, 1, "L1 should have 1 hit");
+        assert_eq!(stats.levels[1].misses, 1, "L1 should have 1 miss");
+    });
+}
+
+#[test]
+fn test_write_failure_counter_on_backfill_error() {
+    let runtime = RuntimeBuilder::new_multi_thread()
+        .enable_all()
+        .worker_threads(2)
+        .build()
+        .unwrap();
+
+    let cache_l0 = Arc::new(ReadOnlyStorage(Arc::new(InMemoryStorage::new())));
+    let cache_l1 = Arc::new(InMemoryStorage::new());
+
+    let storage = MultiLevelStorage::new(vec![
+        cache_l0 as Arc<dyn Storage>,
+        cache_l1.clone() as Arc<dyn Storage>,
+    ]);
+
+    runtime.block_on(async {
+        // Store in L1
+        let entry = CacheWrite::new();
+        cache_l1.put("ro_key", entry).await.unwrap();
+
+        // Get triggers hit at L1, backfill to L0 should fail (read-only)
+        let result = storage.get("ro_key").await.unwrap();
+        assert!(matches!(result, Cache::Hit(_)));
+
+        // Wait for async backfill to complete
+        sleep(Duration::from_millis(300)).await;
+
+        let stats = storage.stats();
+        // L1 should have 1 hit and 1 backfill_from
+        assert_eq!(stats.levels[1].hits, 1);
+        assert_eq!(stats.levels[1].backfills_from, 1);
+        // L0 should have a write failure from the failed backfill
+        assert_eq!(
+            stats.levels[0].write_failures, 1,
+            "Failed backfill should be recorded as write failure"
+        );
+    });
+}
+
+#[test]
+fn test_write_policy_l0_errors_on_readonly_l0() {
+    let runtime = RuntimeBuilder::new_multi_thread()
+        .enable_all()
+        .worker_threads(1)
+        .build()
+        .unwrap();
+
+    let cache_l0 = Arc::new(ReadOnlyStorage(Arc::new(InMemoryStorage::new())));
+    let cache_l1 = Arc::new(InMemoryStorage::new());
+
+    let storage = MultiLevelStorage::with_write_policy(
+        vec![
+            cache_l0 as Arc<dyn Storage>,
+            cache_l1 as Arc<dyn Storage>,
+        ],
+        WritePolicy::L0,
+    );
+
+    runtime.block_on(async {
+        let entry = CacheWrite::new();
+        let result = storage.put("test_key", entry).await;
+        assert!(
+            result.is_err(),
+            "WritePolicy::L0 should fail when L0 is read-only"
+        );
+
+        let stats = storage.stats();
+        assert_eq!(
+            stats.levels[0].write_failures, 1,
+            "Read-only L0 rejection should be recorded as write failure"
+        );
+    });
+}
+
+#[test]
+fn test_backfill_skips_corrupt_data() {
+    let runtime = RuntimeBuilder::new_multi_thread()
+        .enable_all()
+        .worker_threads(2)
+        .build()
+        .unwrap();
+
+    let cache_l0 = Arc::new(InMemoryStorage::new());
+    let cache_l1 = Arc::new(InMemoryStorage::new());
+
+    let storage = MultiLevelStorage::new(vec![
+        cache_l0.clone() as Arc<dyn Storage>,
+        cache_l1.clone() as Arc<dyn Storage>,
+    ]);
+
+    runtime.block_on(async {
+        // Write corrupt data directly into L1's raw storage (not a valid ZIP)
+        cache_l1
+            .put_raw("corrupt_key", b"this is not a valid cache entry".to_vec())
+            .await
+            .unwrap();
+
+        // Also store a valid entry in L1 via normal put
+        let entry = CacheWrite::new();
+        cache_l1.put("valid_key", entry).await.unwrap();
+
+        // Corrupt key: get returns Miss (CacheRead::from fails in InMemoryStorage::get)
+        let result = storage.get("corrupt_key").await.unwrap();
+        assert!(matches!(result, Cache::Miss));
+
+        // Valid key: get returns Hit and triggers backfill
+        let result = storage.get("valid_key").await.unwrap();
+        assert!(matches!(result, Cache::Hit(_)));
+
+        sleep(Duration::from_millis(300)).await;
+
+        // L0 should have the valid key backfilled but NOT the corrupt key
+        let l0_valid = cache_l0.get("valid_key").await.unwrap();
+        assert!(
+            matches!(l0_valid, Cache::Hit(_)),
+            "Valid key should be backfilled to L0"
+        );
+
+        let l0_corrupt = cache_l0.get("corrupt_key").await.unwrap();
+        assert!(
+            matches!(l0_corrupt, Cache::Miss),
+            "Corrupt data should NOT be backfilled to L0"
+        );
     });
 }

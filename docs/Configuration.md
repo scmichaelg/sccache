@@ -190,11 +190,12 @@ Multi-level caching enables hierarchical cache storage with automatic backfill. 
 * `SCCACHE_MULTILEVEL_CHAIN` comma-separated list of cache backend names to use in hierarchy (e.g., `disk,redis,s3`)
   - Order matters: left-to-right is fast-to-slow (L0, L1, L2, ...)
   - Valid names: `disk`, `redis`, `memcached`, `s3`, `gcs`, `azure`, `gha`, `webdav`, `oss`, `cos`
+  - Maximum **8 levels**; duplicate names are rejected
   - Each level must be separately configured with its own environment variables
   - If not set, sccache uses single-level mode (legacy behavior)
 * `SCCACHE_MULTILEVEL_WRITE_POLICY` controls error handling on cache writes (default: `l0`)
   - `ignore` - never fail on write errors, log warnings only (most permissive)
-  - `l0` - fail only if L0 (first level) write fails (default, balances reliability and performance)
+  - `l0` - fail only if L0 (first level) write fails; also fails if L0 is read-only (default, balances reliability and performance)
   - `all` - fail if any read-write level fails (most strict)
   - Read-only levels are always skipped and never cause failures
 
