@@ -1,9 +1,6 @@
 name: integration-tests
 on:
-  push:
-    tags-ignore:
-      - "v*"
-  pull_request:
+  workflow_dispatch:
 # If you want to add integration tests for linux-based binary,
 # please, use the following files:
 # - tests/integration/Makefile
