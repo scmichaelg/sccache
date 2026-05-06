@@ -1,0 +1,40 @@
+---
+steps:
+  - name: "Check for version change"
+    branches: "!main"
+    command: /etc/buildkite-agent/buildkite-scripts/version.sh
+    timeout_in_minutes: 20
+    env:
+      BUILDKITE_CLEAN_CHECKOUT: "true"
+
+  - wait: ~
+
+  - name: ":rust: cargo test"
+    key: tests
+    command: .buildkite/test.sh
+    agents:
+      queue: general-sandpit-us-east-2
+    timeout_in_minutes: 30
+
+  # On non-main branches, run goreleaser in snapshot mode to validate the build
+  - name: ":github: goreleaser snapshot"
+    branches: "!main"
+    depends_on: tests
+    command: .buildkite/goreleaser.sh
+    agents:
+      queue: general-sandpit-us-east-2
+    timeout_in_minutes: 30
+
+  - wait: ~
+    if: build.branch == "main"
+
+  # On main, cut a release if VERSION.txt has been bumped
+  - name: ":github: Create release"
+    branches: "main"
+    depends_on: tests
+    command: .buildkite/goreleaser.sh
+    agents:
+      queue: general-sandpit-us-east-2
+    timeout_in_minutes: 45
+    env:
+      CREATE_RELEASE: "true"
