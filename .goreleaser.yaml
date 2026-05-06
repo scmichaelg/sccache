@@ -1,0 +1,58 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+project_name: sccache
+
+builds:
+  - id: sccache
+    builder: rust
+    binary: sccache
+    targets:
+      - x86_64-unknown-linux-musl
+      - aarch64-unknown-linux-musl
+      - x86_64-apple-darwin
+      - aarch64-apple-darwin
+    tool: cargo-zigbuild
+    flags:
+      - --release
+      - --locked
+      - --package=sccache
+      - --features=vendored-openssl
+
+archives:
+  - id: sccache
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+brews:
+  - homepage: https://github.com/SafetyCulture/sccache
+    description: "ccache-like compiler caching tool with multi-level cache support."
+    repository:
+      owner: SafetyCulture
+      name: homebrew-tap
+    download_strategy: GitHubPrivateRepositoryReleaseDownloadStrategy
+    custom_require: "../custom_download_strategy"
+    directory: Formula
+    install: |
+      bin.install "sccache"
+    test: |
+      system "#{bin}/sccache --version"
+    commit_author:
+      name: "SafetyTravis"
+      email: "devops@safetyculture.io"

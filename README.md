@@ -50,24 +50,35 @@ Table of Contents (ToC)
 
 ## Installation
 
-### macOS
+This repo is an **internal** SafetyCulture fork. Releases are published to the
+[`SafetyCulture/homebrew-tap`](https://github.com/SafetyCulture/homebrew-tap)
+private tap, which requires a GitHub PAT with `repo` scope.
 
-Install via [Homebrew](https://brew.sh/) using the SafetyCulture tap:
+### One-time setup
+
+1. Create a [GitHub personal access token](https://github.com/settings/tokens)
+   with the `repo` scope and export it:
+   ```bash
+   export HOMEBREW_GITHUB_API_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+   ```
+   Add the export to your shell profile so future `brew` invocations can read
+   it.
+
+2. Tap the SafetyCulture private tap (one-time per machine):
+   ```bash
+   brew tap safetyculture/tap
+   ```
+
+### Install
 
 ```bash
-brew tap scmichaelg/sccache
-brew install scmichaelg/sccache/sccache
+brew install sccache
 ```
 
-### Linux
-
-Download the pre-built binary from the [releases page](https://github.com/scmichaelg/sccache/releases/latest):
+To upgrade later:
 
 ```bash
-SCCACHE_VERSION=0.14.1
-curl -LO "https://github.com/scmichaelg/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
-tar xzf "sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
-mv "sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" ~/.local/bin/
+brew update && brew upgrade sccache
 ```
 
 ---
