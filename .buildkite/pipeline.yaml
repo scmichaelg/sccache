@@ -1,40 +1,105 @@
 ---
+common:
+  images:
+    - &rust-zigbuild "messense/cargo-zigbuild:0.20.0"
+
+  plugins:
+    - &gh-auth
+      ssh://git@github.com/SafetyCulture/gh-authenticator-buildkite-plugin.git#v0.1.0:
+        type: releaser
+    - &ecr
+      ecr#v2.12.0:
+        login: true
+        account-ids: "288761735648"
+    - &dind-k8s
+      kubernetes:
+        sidecars:
+          - image: 288761735648.dkr.ecr.us-east-1.amazonaws.com/mirror/docker.io/library/docker:dind
+            command: ["dockerd-entrypoint.sh"]
+            securityContext:
+              privileged: true
+            env:
+              - name: DOCKER_TLS_CERTDIR
+                value: ""
+    - &rust-step
+      docker#v5.13.0:
+        image: *rust-zigbuild
+        shell: ["/bin/bash", "-eo", "pipefail", "-c"]
+        environment:
+          - "GITHUB_TOKEN"
+          - "CARGO_HOME=/workdir/.cargo"
+          - "CARGO_TARGET_DIR=/workdir/target"
+        volumes:
+          - ".:/workdir"
+        workdir: /workdir
+
+env:
+  GORELEASER_VERSION: "v2.14.3"
+
 steps:
-  - name: "Check for version change"
-    branches: "!main"
-    command: /etc/buildkite-agent/buildkite-scripts/version.sh
-    timeout_in_minutes: 20
-    env:
-      BUILDKITE_CLEAN_CHECKOUT: "true"
-
-  - wait: ~
-
-  - name: ":rust: cargo test"
+  - label: ":rust: cargo test"
     key: tests
-    command: .buildkite/test.sh
-    agents:
-      queue: general-sandpit-us-east-2
+    command: cargo test --locked --no-default-features
+    env:
+      DOCKER_HOST: "tcp://localhost:2375"
     timeout_in_minutes: 30
+    plugins:
+      - *ecr
+      - *dind-k8s
+      - *rust-step
 
-  # On non-main branches, run goreleaser in snapshot mode to validate the build
-  - name: ":github: goreleaser snapshot"
+  - label: ":goreleaser: snapshot"
+    key: snapshot
     branches: "!main"
     depends_on: tests
-    command: .buildkite/goreleaser.sh
-    agents:
-      queue: general-sandpit-us-east-2
-    timeout_in_minutes: 30
+    command: |
+      curl -sSfL "https://github.com/goreleaser/goreleaser/releases/download/${GORELEASER_VERSION}/goreleaser_Linux_x86_64.tar.gz" \
+        | tar -xzC /usr/local/bin goreleaser
+      rustup target add \
+        x86_64-unknown-linux-musl \
+        aarch64-unknown-linux-musl \
+        x86_64-apple-darwin \
+        aarch64-apple-darwin
+      goreleaser build --snapshot --clean
+    artifact_paths:
+      - dist/**/*
+    env:
+      DOCKER_HOST: "tcp://localhost:2375"
+    timeout_in_minutes: 45
+    plugins:
+      - *ecr
+      - *dind-k8s
+      - *rust-step
 
   - wait: ~
     if: build.branch == "main"
 
-  # On main, cut a release if VERSION.txt has been bumped
-  - name: ":github: Create release"
+  - label: ":goreleaser: release"
+    key: release
     branches: "main"
     depends_on: tests
-    command: .buildkite/goreleaser.sh
-    agents:
-      queue: general-sandpit-us-east-2
-    timeout_in_minutes: 45
+    command: |
+      VERSION=$(tr -d '[:space:]' < ./VERSION.txt)
+      if [[ -n "$(git ls-remote origin "refs/tags/${VERSION}")" ]]; then
+        echo "Release ${VERSION} already exists. Skipping..."
+        buildkite-agent annotate --style "warning" "No Release Created! VERSION.txt must be updated!"
+        exit 1
+      fi
+      git tag "${VERSION}"
+      curl -sSfL "https://github.com/goreleaser/goreleaser/releases/download/${GORELEASER_VERSION}/goreleaser_Linux_x86_64.tar.gz" \
+        | tar -xzC /usr/local/bin goreleaser
+      rustup target add \
+        x86_64-unknown-linux-musl \
+        aarch64-unknown-linux-musl \
+        x86_64-apple-darwin \
+        aarch64-apple-darwin
+      goreleaser release --clean
+      buildkite-agent annotate --style "success" "New Release Available: ${VERSION}"
     env:
-      CREATE_RELEASE: "true"
+      DOCKER_HOST: "tcp://localhost:2375"
+    timeout_in_minutes: 60
+    plugins:
+      - *gh-auth
+      - *ecr
+      - *dind-k8s
+      - *rust-step
