@@ -6,7 +6,6 @@ common:
 
   images:
     - &rust-zigbuild "messense/cargo-zigbuild:0.20.0"
-    - &goreleaser "288761735648.dkr.ecr.us-east-1.amazonaws.com/mirror/docker.io/goreleaser/goreleaser:v2.15.4"
 
   plugins:
     - &gh-auth
@@ -33,22 +32,10 @@ common:
         environment:
           - "CARGO_HOME=/workdir/.cargo"
           - "CARGO_TARGET_DIR=/workdir/target"
+          - "GITHUB_TOKEN"
         volumes:
           - ".:/workdir"
         workdir: /workdir
-    - &goreleaser-step
-      docker#v5.13.0:
-        image: *goreleaser
-        shell: false
-        environment:
-          - "GITHUB_TOKEN"
-        volumes:
-          - ".:/build"
-        workdir: /build
-    - &artifacts-download
-      artifacts#v1.9.4:
-        download:
-          - "dist/**/*"
 
 steps:
   # Always: cheap test step on every push.
@@ -70,22 +57,6 @@ steps:
   # ─────────────────── Default branch: auto-release ───────────────────
   # Build + snapshot run unconditionally on main and roll straight into
   # the real release, no manual gate.
-  - label: ":rust: build release binaries"
-    key: build
-    depends_on: tests
-    if: build.branch == pipeline.default_branch
-    command: .buildkite/scripts/build-rust
-    agents: *k8s-default
-    artifact_paths:
-      - "dist/**/*"
-    env:
-      DOCKER_HOST: "tcp://localhost:2375"
-    timeout_in_minutes: 45
-    plugins:
-      - *ecr
-      - *dind-k8s
-      - *rust-step
-
   - label: ":abacus: Calculate Version"
     key: calculate-version
     depends_on: tests
@@ -95,19 +66,17 @@ steps:
 
   - label: ":goreleaser: snapshot"
     key: snapshot
-    depends_on:
-      - build
-      - calculate-version
+    depends_on: calculate-version
     if: build.branch == pipeline.default_branch
-    command: ["release", "--snapshot", "--clean", "--skip=publish"]
+    command: .buildkite/scripts/run-goreleaser release --snapshot --clean --skip=publish
     agents: *k8s-default
     env:
       DOCKER_HOST: "tcp://localhost:2375"
+    timeout_in_minutes: 45
     plugins:
-      - *artifacts-download
       - *ecr
       - *dind-k8s
-      - *goreleaser-step
+      - *rust-step
 
   - label: ":hammer_and_wrench: Prepare Release"
     key: prepare-release
@@ -122,16 +91,16 @@ steps:
     key: release
     depends_on: prepare-release
     if: build.branch == pipeline.default_branch
-    command: ["release", "--clean"]
+    command: .buildkite/scripts/run-goreleaser release --clean
     agents: *k8s-default
     env:
       DOCKER_HOST: "tcp://localhost:2375"
+    timeout_in_minutes: 45
     plugins:
       - *gh-auth
-      - *artifacts-download
       - *ecr
       - *dind-k8s
-      - *goreleaser-step
+      - *rust-step
 
   - label: ":memo: Release Annotation"
     depends_on: release
@@ -140,29 +109,13 @@ steps:
     agents: *k8s-default
 
   # ─────────────────── Feature branch: gated preview ───────────────────
-  # Tests always run; everything heavier (build, snapshot, preview release)
+  # Tests always run; everything heavier (build + snapshot + preview release)
   # only runs after a human unblocks "Release Preview?" so feature-branch
   # CI stays cheap.
   - block: ":lock: Release Preview?"
     key: approve-preview-release
     depends_on: tests
     if: build.branch != pipeline.default_branch
-
-  - label: ":rust: build preview binaries"
-    key: build-preview
-    depends_on: approve-preview-release
-    if: build.branch != pipeline.default_branch
-    command: .buildkite/scripts/build-rust
-    agents: *k8s-default
-    artifact_paths:
-      - "dist/**/*"
-    env:
-      DOCKER_HOST: "tcp://localhost:2375"
-    timeout_in_minutes: 45
-    plugins:
-      - *ecr
-      - *dind-k8s
-      - *rust-step
 
   - label: ":abacus: Calculate Preview Version"
     key: calculate-preview-version
@@ -173,19 +126,17 @@ steps:
 
   - label: ":goreleaser: snapshot preview"
     key: snapshot-preview
-    depends_on:
-      - build-preview
-      - calculate-preview-version
+    depends_on: calculate-preview-version
     if: build.branch != pipeline.default_branch
-    command: ["release", "--snapshot", "--clean", "--skip=publish"]
+    command: .buildkite/scripts/run-goreleaser release --snapshot --clean --skip=publish
     agents: *k8s-default
     env:
       DOCKER_HOST: "tcp://localhost:2375"
+    timeout_in_minutes: 45
     plugins:
-      - *artifacts-download
       - *ecr
       - *dind-k8s
-      - *goreleaser-step
+      - *rust-step
 
   - label: ":hammer_and_wrench: Prepare Preview Release"
     key: prepare-preview-release
@@ -200,16 +151,16 @@ steps:
     key: preview-release
     depends_on: prepare-preview-release
     if: build.branch != pipeline.default_branch
-    command: ["release", "--clean"]
+    command: .buildkite/scripts/run-goreleaser release --clean
     agents: *k8s-default
     env:
       DOCKER_HOST: "tcp://localhost:2375"
+    timeout_in_minutes: 45
     plugins:
       - *gh-auth
-      - *artifacts-download
       - *ecr
       - *dind-k8s
-      - *goreleaser-step
+      - *rust-step
 
   - label: ":memo: Preview Release Annotation"
     depends_on: preview-release

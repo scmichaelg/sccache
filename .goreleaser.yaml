@@ -4,16 +4,19 @@ project_name: sccache
 
 builds:
   - id: sccache
-    builder: prebuilt
+    builder: rust
     binary: sccache
-    goos:
-      - linux
-      - darwin
-    goarch:
-      - amd64
-      - arm64
-    prebuilt:
-      path: "dist/{{ .Os }}_{{ .Arch }}/sccache"
+    targets:
+      - x86_64-unknown-linux-musl
+      - aarch64-unknown-linux-musl
+      - x86_64-apple-darwin
+      - aarch64-apple-darwin
+    tool: cargo-zigbuild
+    flags:
+      - --release
+      - --locked
+      - --package=sccache
+      - --features=vendored-openssl
 
 archives:
   - id: sccache
