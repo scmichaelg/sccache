@@ -2,6 +2,7 @@
 common:
   images:
     - &rust-zigbuild "messense/cargo-zigbuild:0.20.0"
+    - &goreleaser "288761735648.dkr.ecr.us-east-1.amazonaws.com/mirror/docker.io/goreleaser/goreleaser:v2.15.4"
 
   plugins:
     - &gh-auth
@@ -26,15 +27,20 @@ common:
         image: *rust-zigbuild
         shell: ["/bin/bash", "-eo", "pipefail", "-c"]
         environment:
-          - "GITHUB_TOKEN"
           - "CARGO_HOME=/workdir/.cargo"
           - "CARGO_TARGET_DIR=/workdir/target"
         volumes:
           - ".:/workdir"
         workdir: /workdir
-
-env:
-  GORELEASER_VERSION: "v2.14.3"
+    - &goreleaser-step
+      docker#v5.13.0:
+        image: *goreleaser
+        shell: false
+        environment:
+          - "GITHUB_TOKEN"
+        volumes:
+          - ".:/build"
+        workdir: /build
 
 steps:
   - label: ":rust: cargo test"
@@ -48,21 +54,12 @@ steps:
       - *dind-k8s
       - *rust-step
 
-  - label: ":goreleaser: snapshot"
-    key: snapshot
-    branches: "!main"
+  - label: ":rust: build release binaries"
+    key: build
     depends_on: tests
-    command: |
-      curl -sSfL "https://github.com/goreleaser/goreleaser/releases/download/${GORELEASER_VERSION}/goreleaser_Linux_x86_64.tar.gz" \
-        | tar -xzC /usr/local/bin goreleaser
-      rustup target add \
-        x86_64-unknown-linux-musl \
-        aarch64-unknown-linux-musl \
-        x86_64-apple-darwin \
-        aarch64-apple-darwin
-      goreleaser build --snapshot --clean
+    command: .buildkite/scripts/build-rust
     artifact_paths:
-      - dist/**/*
+      - "dist/**/*"
     env:
       DOCKER_HOST: "tcp://localhost:2375"
     timeout_in_minutes: 45
@@ -71,35 +68,89 @@ steps:
       - *dind-k8s
       - *rust-step
 
-  - wait: ~
-    if: build.branch == "main"
+  - label: ":abacus: Calculate Version"
+    key: calculate-version
+    command: "buildkite-agent meta-data set next-version $(.buildkite/scripts/auto-version)"
 
-  - label: ":goreleaser: release"
-    key: release
-    branches: "main"
-    depends_on: tests
-    command: |
-      VERSION=$(tr -d '[:space:]' < ./VERSION.txt)
-      if [[ -n "$(git ls-remote origin "refs/tags/${VERSION}")" ]]; then
-        echo "Release ${VERSION} already exists. Skipping..."
-        buildkite-agent annotate --style "warning" "No Release Created! VERSION.txt must be updated!"
-        exit 1
-      fi
-      git tag "${VERSION}"
-      curl -sSfL "https://github.com/goreleaser/goreleaser/releases/download/${GORELEASER_VERSION}/goreleaser_Linux_x86_64.tar.gz" \
-        | tar -xzC /usr/local/bin goreleaser
-      rustup target add \
-        x86_64-unknown-linux-musl \
-        aarch64-unknown-linux-musl \
-        x86_64-apple-darwin \
-        aarch64-apple-darwin
-      goreleaser release --clean
-      buildkite-agent annotate --style "success" "New Release Available: ${VERSION}"
+  - label: ":goreleaser: snapshot"
+    key: snapshot
+    depends_on:
+      - build
+      - calculate-version
+    command: ["release", "--snapshot", "--clean", "--skip=publish"]
     env:
       DOCKER_HOST: "tcp://localhost:2375"
-    timeout_in_minutes: 60
     plugins:
-      - *gh-auth
+      - artifacts#v1.9.4:
+          download:
+            - "dist/**/*"
       - *ecr
       - *dind-k8s
-      - *rust-step
+      - *goreleaser-step
+
+  # Default branch: automatic release
+  - label: ":hammer_and_wrench: Prepare Release"
+    key: prepare-release
+    depends_on:
+      - snapshot
+    if: build.branch == pipeline.default_branch
+    command: .buildkite/scripts/prepare-release
+    plugins:
+      - *gh-auth
+
+  - label: ":goreleaser: Release"
+    key: release
+    depends_on: prepare-release
+    if: build.branch == pipeline.default_branch
+    command: ["release", "--clean"]
+    env:
+      DOCKER_HOST: "tcp://localhost:2375"
+    plugins:
+      - *gh-auth
+      - artifacts#v1.9.4:
+          download:
+            - "dist/**/*"
+      - *ecr
+      - *dind-k8s
+      - *goreleaser-step
+
+  - label: ":memo: Release Annotation"
+    depends_on: release
+    if: build.branch == pipeline.default_branch
+    command: .buildkite/scripts/annotate-release
+
+  # Non-default branches: gated preview release
+  - block: ":lock: Release Preview?"
+    key: approve-preview-release
+    depends_on:
+      - snapshot
+    if: build.branch != pipeline.default_branch
+
+  - label: ":hammer_and_wrench: Prepare Preview Release"
+    key: prepare-preview-release
+    depends_on: approve-preview-release
+    if: build.branch != pipeline.default_branch
+    command: .buildkite/scripts/prepare-release
+    plugins:
+      - *gh-auth
+
+  - label: ":goreleaser: Preview Release"
+    key: preview-release
+    depends_on: prepare-preview-release
+    if: build.branch != pipeline.default_branch
+    command: ["release", "--clean"]
+    env:
+      DOCKER_HOST: "tcp://localhost:2375"
+    plugins:
+      - *gh-auth
+      - artifacts#v1.9.4:
+          download:
+            - "dist/**/*"
+      - *ecr
+      - *dind-k8s
+      - *goreleaser-step
+
+  - label: ":memo: Preview Release Annotation"
+    depends_on: preview-release
+    if: build.branch != pipeline.default_branch
+    command: .buildkite/scripts/annotate-release

@@ -1,0 +1,67 @@
+#!/bin/bash
+set -o errexit
+set -o nounset
+set -o pipefail
+
+TAG=$(buildkite-agent meta-data get next-version)
+
+REPO="${BUILDKITE_REPO:-$(git remote get-url origin)}"
+REPO="${REPO#*github.com:}"
+REPO="${REPO#*github.com/}"
+REPO="${REPO%.git}"
+
+cleanup_preview_tags() {
+  local pattern="$1"
+  while IFS=$'\t' read -r _sha ref; do
+    [[ -z "${ref}" || "${ref}" == *"^{}" ]] && continue
+    old_tag="${ref#refs/tags/}"
+    echo "Cleaning up ${old_tag}"
+
+    local git_output
+    if ! git_output=$(git push origin --delete "${old_tag}" 2>&1); then
+      if echo "${git_output}" | grep -qi "remote ref does not exist"; then
+        echo "Remote tag ${old_tag} already deleted"
+      else
+        echo "Error deleting remote tag: ${git_output}" >&2
+        return 1
+      fi
+    fi
+
+    git tag -d "${old_tag}" 2>/dev/null || true
+
+    local gh_output
+    if ! gh_output=$(gh release delete "${old_tag}" --repo "${REPO}" --yes 2>&1); then
+      if echo "${gh_output}" | grep -qi "not found"; then
+        echo "No release found for ${old_tag}, skipping"
+      else
+        echo "Error deleting release: ${gh_output}" >&2
+        return 1
+      fi
+    fi
+  done < <(git ls-remote --tags origin "${pattern}")
+}
+
+if [[ "${BUILDKITE_BRANCH}" == "${BUILDKITE_PIPELINE_DEFAULT_BRANCH:-main}" ]]; then
+  PR_NUMBER=$(echo "${BUILDKITE_MESSAGE:-}" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
+  if [[ -n "${PR_NUMBER}" ]]; then
+    MERGED_BRANCH=$(gh pr view "${PR_NUMBER}" --repo "${REPO}" --json headRefName -q '.headRefName')
+    if [[ -n "${MERGED_BRANCH}" ]]; then
+      BRANCH_SLUG=$(echo "${MERGED_BRANCH}" | sed 's/[^0-9A-Za-z-]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
+      echo "--- Cleaning up preview releases for merged branch: ${MERGED_BRANCH}"
+      cleanup_preview_tags "*-preview.${BRANCH_SLUG}"
+    else
+      echo "Could not determine merged branch from PR #${PR_NUMBER}, skipping preview cleanup"
+    fi
+  else
+    echo "No PR number found in commit message, skipping preview cleanup"
+  fi
+else
+  BRANCH_SLUG=$(echo "${BUILDKITE_BRANCH}" | sed 's/[^0-9A-Za-z-]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
+
+  echo "--- Cleaning up all preview tags/releases for branch"
+  cleanup_preview_tags "*-preview.${BRANCH_SLUG}"
+fi
+
+echo "--- Creating tag ${TAG}"
+git tag "${TAG}"
+git push origin "${TAG}"
