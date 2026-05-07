@@ -1,5 +1,12 @@
 ---
 common:
+  agents:
+    - &k8s-default
+      queue: default
+    - &k8s-large
+      queue: default
+      resource_class: large
+
   images:
     - &rust-zigbuild "messense/cargo-zigbuild:0.20.0"
     - &goreleaser "288761735648.dkr.ecr.us-east-1.amazonaws.com/mirror/docker.io/goreleaser/goreleaser:v2.15.4"
@@ -46,6 +53,7 @@ steps:
   - label: ":rust: cargo test"
     key: tests
     command: cargo test --locked --no-default-features
+    agents: *k8s-default
     env:
       DOCKER_HOST: "tcp://localhost:2375"
     timeout_in_minutes: 30
@@ -58,6 +66,7 @@ steps:
     key: build
     depends_on: tests
     command: .buildkite/scripts/build-rust
+    agents: *k8s-large
     artifact_paths:
       - "dist/**/*"
     env:
@@ -71,6 +80,7 @@ steps:
   - label: ":abacus: Calculate Version"
     key: calculate-version
     command: "buildkite-agent meta-data set next-version $(.buildkite/scripts/auto-version)"
+    agents: *k8s-default
 
   - label: ":goreleaser: snapshot"
     key: snapshot
@@ -78,6 +88,7 @@ steps:
       - build
       - calculate-version
     command: ["release", "--snapshot", "--clean", "--skip=publish"]
+    agents: *k8s-default
     env:
       DOCKER_HOST: "tcp://localhost:2375"
     plugins:
@@ -95,6 +106,7 @@ steps:
       - snapshot
     if: build.branch == pipeline.default_branch
     command: .buildkite/scripts/prepare-release
+    agents: *k8s-default
     plugins:
       - *gh-auth
 
@@ -103,6 +115,7 @@ steps:
     depends_on: prepare-release
     if: build.branch == pipeline.default_branch
     command: ["release", "--clean"]
+    agents: *k8s-default
     env:
       DOCKER_HOST: "tcp://localhost:2375"
     plugins:
@@ -118,6 +131,7 @@ steps:
     depends_on: release
     if: build.branch == pipeline.default_branch
     command: .buildkite/scripts/annotate-release
+    agents: *k8s-default
 
   # Non-default branches: gated preview release
   - block: ":lock: Release Preview?"
@@ -131,6 +145,7 @@ steps:
     depends_on: approve-preview-release
     if: build.branch != pipeline.default_branch
     command: .buildkite/scripts/prepare-release
+    agents: *k8s-default
     plugins:
       - *gh-auth
 
@@ -139,6 +154,7 @@ steps:
     depends_on: prepare-preview-release
     if: build.branch != pipeline.default_branch
     command: ["release", "--clean"]
+    agents: *k8s-default
     env:
       DOCKER_HOST: "tcp://localhost:2375"
     plugins:
@@ -154,3 +170,4 @@ steps:
     depends_on: preview-release
     if: build.branch != pipeline.default_branch
     command: .buildkite/scripts/annotate-release
+    agents: *k8s-default
