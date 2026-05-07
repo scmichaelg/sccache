@@ -21,8 +21,11 @@ TARGETS=(
   aarch64-apple-darwin
 )
 
-echo "--- Adding rust targets"
-rustup target add "${TARGETS[@]}"
+# `goreleaser check` only validates config — no rust targets needed.
+if [[ "${1:-}" != "check" ]]; then
+  echo "--- Adding rust targets"
+  rustup target add "${TARGETS[@]}"
+fi
 
 if ! command -v goreleaser >/dev/null 2>&1; then
   echo "--- Installing goreleaser ${GORELEASER_VERSION}"

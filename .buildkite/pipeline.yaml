@@ -55,8 +55,8 @@ steps:
       - *rust-step
 
   # ─────────────────── Default branch: auto-release ───────────────────
-  # Build + snapshot run unconditionally on main and roll straight into
-  # the real release, no manual gate.
+  # Tests + config check run unconditionally on main and roll straight
+  # into the real release, no manual gate.
   - label: ":abacus: Calculate Version"
     key: calculate-version
     depends_on: tests
@@ -64,15 +64,15 @@ steps:
     command: "buildkite-agent meta-data set next-version $(.buildkite/scripts/auto-version)"
     agents: *k8s-default
 
-  - label: ":goreleaser: snapshot"
-    key: snapshot
+  - label: ":goreleaser: check config"
+    key: goreleaser-check
     depends_on: calculate-version
     if: build.branch == pipeline.default_branch
-    command: .buildkite/scripts/run-goreleaser release --snapshot --clean --skip=publish
+    command: .buildkite/scripts/run-goreleaser check
     agents: *k8s-default
     env:
       DOCKER_HOST: "tcp://localhost:2375"
-    timeout_in_minutes: 45
+    timeout_in_minutes: 5
     plugins:
       - *ecr
       - *dind-k8s
@@ -80,7 +80,7 @@ steps:
 
   - label: ":hammer_and_wrench: Prepare Release"
     key: prepare-release
-    depends_on: snapshot
+    depends_on: goreleaser-check
     if: build.branch == pipeline.default_branch
     command: .buildkite/scripts/prepare-release
     agents: *k8s-default
@@ -109,7 +109,7 @@ steps:
     agents: *k8s-default
 
   # ─────────────────── Feature branch: gated preview ───────────────────
-  # Tests always run; everything heavier (build + snapshot + preview release)
+  # Tests always run; everything heavier (config check + preview release)
   # only runs after a human unblocks "Release Preview?" so feature-branch
   # CI stays cheap.
   - block: ":lock: Release Preview?"
@@ -124,15 +124,15 @@ steps:
     command: "buildkite-agent meta-data set next-version $(.buildkite/scripts/auto-version)"
     agents: *k8s-default
 
-  - label: ":goreleaser: snapshot preview"
-    key: snapshot-preview
+  - label: ":goreleaser: check config (preview)"
+    key: goreleaser-check-preview
     depends_on: calculate-preview-version
     if: build.branch != pipeline.default_branch
-    command: .buildkite/scripts/run-goreleaser release --snapshot --clean --skip=publish
+    command: .buildkite/scripts/run-goreleaser check
     agents: *k8s-default
     env:
       DOCKER_HOST: "tcp://localhost:2375"
-    timeout_in_minutes: 45
+    timeout_in_minutes: 5
     plugins:
       - *ecr
       - *dind-k8s
@@ -140,7 +140,7 @@ steps:
 
   - label: ":hammer_and_wrench: Prepare Preview Release"
     key: prepare-preview-release
-    depends_on: snapshot-preview
+    depends_on: goreleaser-check-preview
     if: build.branch != pipeline.default_branch
     command: .buildkite/scripts/prepare-release
     agents: *k8s-default
