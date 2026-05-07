@@ -40,6 +40,12 @@ changelog:
       - "^test:"
       - "^chore:"
 
+release:
+  prerelease: auto
+  github:
+    owner: SafetyCulture
+    name: sccache
+
 brews:
   - homepage: https://github.com/SafetyCulture/sccache
     description: "ccache-like compiler caching tool with multi-level cache support."
@@ -49,6 +55,7 @@ brews:
     download_strategy: GitHubPrivateRepositoryReleaseDownloadStrategy
     custom_require: "../custom_download_strategy"
     directory: Formula
+    skip_upload: auto
     install: |
       bin.install "sccache"
     test: |

@@ -1,0 +1,22 @@
+#!/bin/bash
+set -o errexit
+set -o nounset
+set -o pipefail
+
+VERSION=$(buildkite-agent meta-data get next-version)
+REPO="${BUILDKITE_REPO:-$(git remote get-url origin)}"
+REPO="${REPO#*github.com:}"
+REPO="${REPO#*github.com/}"
+REPO="${REPO%.git}"
+RELEASE_URL="https://github.com/${REPO}/releases/tag/${VERSION}"
+
+buildkite-agent annotate --style success --context release <<EOF
+:rocket: **${VERSION}**
+
+[View release on GitHub](${RELEASE_URL})
+
+Install via Homebrew once the formula is published:
+\`\`\`
+brew update && brew install safetyculture/tap/sccache
+\`\`\`
+EOF

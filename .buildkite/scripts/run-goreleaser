@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+#
+# Wrapper that prepares a cargo-zigbuild container to run goreleaser's
+# `builder: rust` and then invokes goreleaser with the given args.
+#
+# Why this exists:
+#   The goreleaser OSS image has no Rust toolchain, and the `prebuilt`
+#   builder is Pro-only. So we use the cargo-zigbuild image (which has
+#   rust + zig + cargo-zigbuild) and install goreleaser inside it.
+#
+set -o errexit
+set -o nounset
+set -o pipefail
+
+GORELEASER_VERSION="${GORELEASER_VERSION:-v2.15.4}"
+
+TARGETS=(
+  x86_64-unknown-linux-musl
+  aarch64-unknown-linux-musl
+  x86_64-apple-darwin
+  aarch64-apple-darwin
+)
+
+echo "--- Adding rust targets"
+rustup target add "${TARGETS[@]}"
+
+if ! command -v goreleaser >/dev/null 2>&1; then
+  echo "--- Installing goreleaser ${GORELEASER_VERSION}"
+  curl -sSL "https://github.com/goreleaser/goreleaser/releases/download/${GORELEASER_VERSION}/goreleaser_Linux_x86_64.tar.gz" \
+    | tar xz -C /usr/local/bin goreleaser
+fi
+
+echo "--- goreleaser $*"
+exec goreleaser "$@"

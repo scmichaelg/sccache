@@ -1,40 +1,169 @@
 ---
+common:
+  agents:
+    - &k8s-default
+      queue: default
+
+  images:
+    - &rust-zigbuild "messense/cargo-zigbuild:0.20.0"
+
+  plugins:
+    - &gh-auth
+      ssh://git@github.com/SafetyCulture/gh-authenticator-buildkite-plugin.git#v0.1.2:
+        type: releaser
+    - &ecr
+      ecr#v2.12.0:
+        login: true
+        account-ids: "288761735648"
+    - &dind-k8s
+      kubernetes:
+        sidecars:
+          - image: 288761735648.dkr.ecr.us-east-1.amazonaws.com/mirror/docker.io/library/docker:dind
+            command: ["dockerd-entrypoint.sh"]
+            securityContext:
+              privileged: true
+            env:
+              - name: DOCKER_TLS_CERTDIR
+                value: ""
+    - &rust-step
+      docker#v5.13.0:
+        image: *rust-zigbuild
+        shell: ["/bin/bash", "-eo", "pipefail", "-c"]
+        environment:
+          - "CARGO_HOME=/workdir/.cargo"
+          - "CARGO_TARGET_DIR=/workdir/target"
+          - "GITHUB_TOKEN"
+        volumes:
+          - ".:/workdir"
+        workdir: /workdir
+
 steps:
-  - name: "Check for version change"
-    branches: "!main"
-    command: /etc/buildkite-agent/buildkite-scripts/version.sh
-    timeout_in_minutes: 20
-    env:
-      BUILDKITE_CLEAN_CHECKOUT: "true"
-
-  - wait: ~
-
-  - name: ":rust: cargo test"
+  # Always: cheap test step on every push.
+  - label: ":rust: cargo test"
     key: tests
-    command: .buildkite/test.sh
-    agents:
-      queue: general-sandpit-us-east-2
-    timeout_in_minutes: 30
-
-  # On non-main branches, run goreleaser in snapshot mode to validate the build
-  - name: ":github: goreleaser snapshot"
-    branches: "!main"
-    depends_on: tests
-    command: .buildkite/goreleaser.sh
-    agents:
-      queue: general-sandpit-us-east-2
-    timeout_in_minutes: 30
-
-  - wait: ~
-    if: build.branch == "main"
-
-  # On main, cut a release if VERSION.txt has been bumped
-  - name: ":github: Create release"
-    branches: "main"
-    depends_on: tests
-    command: .buildkite/goreleaser.sh
-    agents:
-      queue: general-sandpit-us-east-2
-    timeout_in_minutes: 45
+    # test_run_log_no_perm asserts that opening /no-perm.log for write fails
+    # with EACCES. The cargo-zigbuild container runs as root; root can write
+    # anywhere, so the assertion never triggers. Skip in containerized runs.
+    command: cargo test --locked --no-default-features -- --skip test_run_log_no_perm
+    agents: *k8s-default
     env:
-      CREATE_RELEASE: "true"
+      DOCKER_HOST: "tcp://localhost:2375"
+    timeout_in_minutes: 30
+    plugins:
+      - *ecr
+      - *dind-k8s
+      - *rust-step
+
+  # ─────────────────── Default branch: auto-release ───────────────────
+  # Build + snapshot run unconditionally on main and roll straight into
+  # the real release, no manual gate.
+  - label: ":abacus: Calculate Version"
+    key: calculate-version
+    depends_on: tests
+    if: build.branch == pipeline.default_branch
+    command: "buildkite-agent meta-data set next-version $(.buildkite/scripts/auto-version)"
+    agents: *k8s-default
+
+  - label: ":goreleaser: snapshot"
+    key: snapshot
+    depends_on: calculate-version
+    if: build.branch == pipeline.default_branch
+    command: .buildkite/scripts/run-goreleaser release --snapshot --clean --skip=publish
+    agents: *k8s-default
+    env:
+      DOCKER_HOST: "tcp://localhost:2375"
+    timeout_in_minutes: 45
+    plugins:
+      - *ecr
+      - *dind-k8s
+      - *rust-step
+
+  - label: ":hammer_and_wrench: Prepare Release"
+    key: prepare-release
+    depends_on: snapshot
+    if: build.branch == pipeline.default_branch
+    command: .buildkite/scripts/prepare-release
+    agents: *k8s-default
+    plugins:
+      - *gh-auth
+
+  - label: ":goreleaser: Release"
+    key: release
+    depends_on: prepare-release
+    if: build.branch == pipeline.default_branch
+    command: .buildkite/scripts/run-goreleaser release --clean
+    agents: *k8s-default
+    env:
+      DOCKER_HOST: "tcp://localhost:2375"
+    timeout_in_minutes: 45
+    plugins:
+      - *gh-auth
+      - *ecr
+      - *dind-k8s
+      - *rust-step
+
+  - label: ":memo: Release Annotation"
+    depends_on: release
+    if: build.branch == pipeline.default_branch
+    command: .buildkite/scripts/annotate-release
+    agents: *k8s-default
+
+  # ─────────────────── Feature branch: gated preview ───────────────────
+  # Tests always run; everything heavier (build + snapshot + preview release)
+  # only runs after a human unblocks "Release Preview?" so feature-branch
+  # CI stays cheap.
+  - block: ":lock: Release Preview?"
+    key: approve-preview-release
+    depends_on: tests
+    if: build.branch != pipeline.default_branch
+
+  - label: ":abacus: Calculate Preview Version"
+    key: calculate-preview-version
+    depends_on: approve-preview-release
+    if: build.branch != pipeline.default_branch
+    command: "buildkite-agent meta-data set next-version $(.buildkite/scripts/auto-version)"
+    agents: *k8s-default
+
+  - label: ":goreleaser: snapshot preview"
+    key: snapshot-preview
+    depends_on: calculate-preview-version
+    if: build.branch != pipeline.default_branch
+    command: .buildkite/scripts/run-goreleaser release --snapshot --clean --skip=publish
+    agents: *k8s-default
+    env:
+      DOCKER_HOST: "tcp://localhost:2375"
+    timeout_in_minutes: 45
+    plugins:
+      - *ecr
+      - *dind-k8s
+      - *rust-step
+
+  - label: ":hammer_and_wrench: Prepare Preview Release"
+    key: prepare-preview-release
+    depends_on: snapshot-preview
+    if: build.branch != pipeline.default_branch
+    command: .buildkite/scripts/prepare-release
+    agents: *k8s-default
+    plugins:
+      - *gh-auth
+
+  - label: ":goreleaser: Preview Release"
+    key: preview-release
+    depends_on: prepare-preview-release
+    if: build.branch != pipeline.default_branch
+    command: .buildkite/scripts/run-goreleaser release --clean
+    agents: *k8s-default
+    env:
+      DOCKER_HOST: "tcp://localhost:2375"
+    timeout_in_minutes: 45
+    plugins:
+      - *gh-auth
+      - *ecr
+      - *dind-k8s
+      - *rust-step
+
+  - label: ":memo: Preview Release Annotation"
+    depends_on: preview-release
+    if: build.branch != pipeline.default_branch
+    command: .buildkite/scripts/annotate-release
+    agents: *k8s-default

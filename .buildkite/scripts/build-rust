@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+#
+# Build sccache for all release targets via cargo-zigbuild and lay the
+# binaries out at dist/{os}_{arch}/sccache so goreleaser's prebuilt
+# builder can pick them up in the next step.
+#
+# Runs inside the messense/cargo-zigbuild container.
+#
+set -o errexit
+set -o nounset
+set -o pipefail
+
+declare -A TRIPLES_TO_PATHS=(
+  [x86_64-unknown-linux-musl]=linux_amd64
+  [aarch64-unknown-linux-musl]=linux_arm64
+  [x86_64-apple-darwin]=darwin_amd64
+  [aarch64-apple-darwin]=darwin_arm64
+)
+
+echo "--- Adding rust targets"
+for triple in "${!TRIPLES_TO_PATHS[@]}"; do
+  rustup target add "${triple}"
+done
+
+mkdir -p dist
+
+for triple in "${!TRIPLES_TO_PATHS[@]}"; do
+  echo "--- Building ${triple}"
+  cargo zigbuild \
+    --release \
+    --locked \
+    --package=sccache \
+    --features=vendored-openssl \
+    --target="${triple}"
+
+  out_dir="dist/${TRIPLES_TO_PATHS[$triple]}"
+  mkdir -p "${out_dir}"
+  cp "target/${triple}/release/sccache" "${out_dir}/sccache"
+  chmod +x "${out_dir}/sccache"
+done
+
+echo "--- Build artifacts"
+find dist -type f -name sccache -exec ls -lh {} \;
