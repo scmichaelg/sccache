@@ -52,7 +52,10 @@ common:
 steps:
   - label: ":rust: cargo test"
     key: tests
-    command: cargo test --locked --no-default-features
+    # test_run_log_no_perm asserts that opening /no-perm.log for write fails
+    # with EACCES. The cargo-zigbuild container runs as root; root can write
+    # anywhere, so the assertion never triggers. Skip in containerized runs.
+    command: cargo test --locked --no-default-features -- --skip test_run_log_no_perm
     agents: *k8s-default
     env:
       DOCKER_HOST: "tcp://localhost:2375"

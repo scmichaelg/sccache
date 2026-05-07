@@ -26,7 +26,7 @@ test:  ## Run cargo test in a Rust Docker container
 	@docker run --rm -v "$(PWD):/app" -w /app \
 		-e CARGO_HOME=/app/.cargo -e CARGO_TARGET_DIR=/app/target \
 		messense/cargo-zigbuild:0.20.0 \
-		cargo test --locked --no-default-features
+		cargo test --locked --no-default-features -- --skip test_run_log_no_perm
 
 .PHONY: build
 build:  ## Cross-compile all release binaries to dist/{os}_{arch}/sccache
