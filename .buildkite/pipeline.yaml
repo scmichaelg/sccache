@@ -48,8 +48,13 @@ common:
         volumes:
           - ".:/build"
         workdir: /build
+    - &artifacts-download
+      artifacts#v1.9.4:
+        download:
+          - "dist/**/*"
 
 steps:
+  # Always: cheap test step on every push.
   - label: ":rust: cargo test"
     key: tests
     # test_run_log_no_perm asserts that opening /no-perm.log for write fails
@@ -65,9 +70,13 @@ steps:
       - *dind-k8s
       - *rust-step
 
+  # ─────────────────── Default branch: auto-release ───────────────────
+  # Build + snapshot run unconditionally on main and roll straight into
+  # the real release, no manual gate.
   - label: ":rust: build release binaries"
     key: build
     depends_on: tests
+    if: build.branch == pipeline.default_branch
     command: .buildkite/scripts/build-rust
     agents: *k8s-large
     artifact_paths:
@@ -82,6 +91,8 @@ steps:
 
   - label: ":abacus: Calculate Version"
     key: calculate-version
+    depends_on: tests
+    if: build.branch == pipeline.default_branch
     command: "buildkite-agent meta-data set next-version $(.buildkite/scripts/auto-version)"
     agents: *k8s-default
 
@@ -90,23 +101,20 @@ steps:
     depends_on:
       - build
       - calculate-version
+    if: build.branch == pipeline.default_branch
     command: ["release", "--snapshot", "--clean", "--skip=publish"]
     agents: *k8s-default
     env:
       DOCKER_HOST: "tcp://localhost:2375"
     plugins:
-      - artifacts#v1.9.4:
-          download:
-            - "dist/**/*"
+      - *artifacts-download
       - *ecr
       - *dind-k8s
       - *goreleaser-step
 
-  # Default branch: automatic release
   - label: ":hammer_and_wrench: Prepare Release"
     key: prepare-release
-    depends_on:
-      - snapshot
+    depends_on: snapshot
     if: build.branch == pipeline.default_branch
     command: .buildkite/scripts/prepare-release
     agents: *k8s-default
@@ -123,9 +131,7 @@ steps:
       DOCKER_HOST: "tcp://localhost:2375"
     plugins:
       - *gh-auth
-      - artifacts#v1.9.4:
-          download:
-            - "dist/**/*"
+      - *artifacts-download
       - *ecr
       - *dind-k8s
       - *goreleaser-step
@@ -136,16 +142,57 @@ steps:
     command: .buildkite/scripts/annotate-release
     agents: *k8s-default
 
-  # Non-default branches: gated preview release
+  # ─────────────────── Feature branch: gated preview ───────────────────
+  # Tests always run; everything heavier (build, snapshot, preview release)
+  # only runs after a human unblocks "Release Preview?" so feature-branch
+  # CI stays cheap.
   - block: ":lock: Release Preview?"
     key: approve-preview-release
-    depends_on:
-      - snapshot
+    depends_on: tests
     if: build.branch != pipeline.default_branch
+
+  - label: ":rust: build preview binaries"
+    key: build-preview
+    depends_on: approve-preview-release
+    if: build.branch != pipeline.default_branch
+    command: .buildkite/scripts/build-rust
+    agents: *k8s-large
+    artifact_paths:
+      - "dist/**/*"
+    env:
+      DOCKER_HOST: "tcp://localhost:2375"
+    timeout_in_minutes: 45
+    plugins:
+      - *ecr
+      - *dind-k8s
+      - *rust-step
+
+  - label: ":abacus: Calculate Preview Version"
+    key: calculate-preview-version
+    depends_on: approve-preview-release
+    if: build.branch != pipeline.default_branch
+    command: "buildkite-agent meta-data set next-version $(.buildkite/scripts/auto-version)"
+    agents: *k8s-default
+
+  - label: ":goreleaser: snapshot preview"
+    key: snapshot-preview
+    depends_on:
+      - build-preview
+      - calculate-preview-version
+    if: build.branch != pipeline.default_branch
+    command: ["release", "--snapshot", "--clean", "--skip=publish"]
+    agents: *k8s-default
+    env:
+      DOCKER_HOST: "tcp://localhost:2375"
+    plugins:
+      - *artifacts-download
+      - *ecr
+      - *dind-k8s
+      - *goreleaser-step
 
   - label: ":hammer_and_wrench: Prepare Preview Release"
     key: prepare-preview-release
-    depends_on: approve-preview-release
+    depends_on: snapshot-preview
     if: build.branch != pipeline.default_branch
     command: .buildkite/scripts/prepare-release
     agents: *k8s-default
@@ -162,9 +209,7 @@ steps:
       DOCKER_HOST: "tcp://localhost:2375"
     plugins:
       - *gh-auth
-      - artifacts#v1.9.4:
-          download:
-            - "dist/**/*"
+      - *artifacts-download
       - *ecr
       - *dind-k8s
       - *goreleaser-step
