@@ -52,6 +52,12 @@ brews:
     repository:
       owner: SafetyCulture
       name: homebrew-tap
+      pull_request:
+        enabled: true
+        base:
+          owner: SafetyCulture
+          name: homebrew-tap
+          branch: master
     download_strategy: GitHubPrivateRepositoryReleaseDownloadStrategy
     custom_require: "../custom_download_strategy"
     directory: Formula
