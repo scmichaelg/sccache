@@ -36,6 +36,10 @@ build:  ## Cross-compile all release binaries to dist/{os}_{arch}/sccache
 snapshot:  ## Full release dry-run — build + archive + brew formula, no publish
 	@scripts/release.sh snapshot
 
+.PHONY: install
+install:  ## Build and install sccache to ~/.cargo/bin (local dev convenience)
+	@cargo install --path . --locked
+
 .PHONY: clean
 clean:  ## Remove dist/
 	@rm -rf dist
