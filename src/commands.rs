@@ -126,26 +126,6 @@ fn run_server_process(startup_timeout: Option<Duration>) -> Result<ServerStartup
     })
 }
 
-#[cfg(not(windows))]
-fn redirect_stderr(f: File) {
-    use libc::dup2;
-    use std::os::unix::io::IntoRawFd;
-    // Ignore errors here.
-    unsafe {
-        dup2(f.into_raw_fd(), 2);
-    }
-}
-
-#[cfg(windows)]
-fn redirect_stderr(f: File) {
-    use std::os::windows::io::IntoRawHandle;
-    use windows_sys::Win32::System::Console::{STD_ERROR_HANDLE, SetStdHandle};
-    // Ignore errors here.
-    unsafe {
-        SetStdHandle(STD_ERROR_HANDLE, f.into_raw_handle() as _);
-    }
-}
-
 /// Create the log file and return an error if cannot be created
 fn create_error_log() -> Result<File> {
     trace!("Create the log file");
@@ -163,13 +143,6 @@ fn create_error_log() -> Result<File> {
         }
     };
     Ok(f)
-}
-
-/// If `SCCACHE_ERROR_LOG` is set, redirect stderr to it.
-fn redirect_error_log(f: File) -> Result<()> {
-    debug!("redirecting stderr into {:?}", f);
-    redirect_stderr(f);
-    Ok(())
 }
 
 /// Re-execute the current executable as a background server.
@@ -657,15 +630,16 @@ pub fn run_command(cmd: Command) -> Result<i32> {
         }
         Command::InternalStartServer => {
             trace!("Command::InternalStartServer");
-            if env::var("SCCACHE_ERROR_LOG").is_ok() {
-                let f = create_error_log()?;
-                // Can't report failure here, we're already daemonized.
-                daemonize()?;
-                redirect_error_log(f)?;
+            // If `SCCACHE_ERROR_LOG` is set, redirect stderr to it. We pass
+            // the log file into `daemonize` so the redirection happens
+            // before the daemon child closes its non-stdio FDs (so we
+            // don't accidentally close the log).
+            let log_file = if env::var("SCCACHE_ERROR_LOG").is_ok() {
+                Some(create_error_log()?)
             } else {
-                // We aren't asking for a log file
-                daemonize()?;
-            }
+                None
+            };
+            daemonize(log_file)?;
             server::start_server(config, &get_addr())?;
         }
         Command::StartServer => {
