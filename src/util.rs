@@ -886,17 +886,41 @@ impl Hasher for HashToDigest<'_> {
 }
 
 /// Pipe `cmd`'s stdio to `/dev/null`, unless a specific env var is set.
+///
+/// If `log_file` is provided, the server's stderr is redirected to it
+/// instead of `/dev/null`.
+///
+/// After daemonizing, *all* non-stdio file descriptors are closed. This is
+/// load-bearing for build orchestrators like Xcode/llbuild and ninja, which
+/// pass a pipe to each compile subprocess and detect completion via the
+/// pipe's EOF — if the sccache server inherits that pipe and keeps it open,
+/// the orchestrator hangs forever waiting for the EOF that never comes.
+/// See mozilla/sccache#2313 and the upstream fix PR mozilla/sccache#2314.
 #[cfg(not(windows))]
-pub fn daemonize() -> Result<()> {
+pub fn daemonize(log_file: Option<File>) -> Result<()> {
     use crate::jobserver::discard_inherited_jobserver;
-    use daemonix::Daemonize;
+    use daemonix::{Daemonize, Stdio};
     use std::env;
     use std::mem;
 
     match env::var("SCCACHE_NO_DAEMON") {
         Ok(ref val) if val == "1" => {}
         _ => {
-            Daemonize::new().start().context("failed to daemonize")?;
+            Daemonize::new()
+                .stderr(
+                    log_file
+                        .map(|f| Stdio::from(f.into_parts().0))
+                        .unwrap_or_else(Stdio::devnull),
+                )
+                .start()
+                .context("failed to daemonize")?;
+            // Close every non-stdio file descriptor we may have inherited from
+            // the parent (e.g. llbuild's task pipe under xcodebuild, or ninja's
+            // covert completion pipe). Leaving these open in the long-lived
+            // server is what causes the deadlock described in #2313.
+            unsafe {
+                close_fds::close_open_fds(3, &[]);
+            }
         }
     }
 
@@ -972,10 +996,24 @@ pub fn daemonize() -> Result<()> {
     }
 }
 
-/// This is a no-op on Windows.
+/// Daemonizing is a no-op on Windows, but we still must redirect stderr to
+/// the log file if one is provided.
 #[cfg(windows)]
-pub fn daemonize() -> Result<()> {
+pub fn daemonize(log_file: Option<File>) -> Result<()> {
+    if let Some(f) = log_file {
+        redirect_stderr_windows(f);
+    }
     Ok(())
+}
+
+#[cfg(windows)]
+fn redirect_stderr_windows(f: File) {
+    use std::os::windows::io::IntoRawHandle;
+    use windows_sys::Win32::System::Console::{STD_ERROR_HANDLE, SetStdHandle};
+    // Ignore errors here.
+    unsafe {
+        SetStdHandle(STD_ERROR_HANDLE, f.into_raw_handle() as _);
+    }
 }
 
 /// Disable connection pool to avoid broken connection between runtime
