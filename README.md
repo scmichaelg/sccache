@@ -81,6 +81,21 @@ To upgrade later:
 brew update && brew upgrade sccache
 ```
 
+### Install from source (`make install`)
+
+If you have the repo cloned and a Rust toolchain (see
+[Build Requirements](#build-requirements)), build and install in one step:
+
+```bash
+make install
+```
+
+This runs `cargo install --path . --locked`, compiling the current working
+tree and installing the `sccache` binary into `~/.cargo/bin` (which `rustup`
+already puts on your `PATH`). Use this when you're working on the fork itself
+or want a build straight from a checked-out branch; it's slower than the
+prebuilt-binary methods below since it compiles from source.
+
 ### Install via GitHub CLI (no Homebrew)
 
 If you'd rather not use the tap, grab the release binary directly. This
