@@ -81,6 +81,52 @@ To upgrade later:
 brew update && brew upgrade sccache
 ```
 
+### Install via GitHub CLI (no Homebrew)
+
+If you'd rather not use the tap, grab the release binary directly. This
+needs the [`gh` CLI](https://cli.github.com/) authenticated against
+SafetyCulture (`gh auth status` should show you logged in) — the same
+GitHub access most developers already have. It auto-detects OS/arch and
+installs the latest release into `~/.local/bin`:
+
+```bash
+repo=SafetyCulture/sccache
+tag=$(gh release view --repo "$repo" --json tagName -q .tagName)   # latest, e.g. v0.15.2
+ver=${tag#v}
+os=$(uname -s | tr '[:upper:]' '[:lower:]')                        # darwin | linux
+arch=$(uname -m); case "$arch" in x86_64) arch=amd64;; arm64|aarch64) arch=arm64;; esac
+tmp=$(mktemp -d)
+gh release download "$tag" --repo "$repo" \
+  --pattern "sccache_${ver}_${os}_${arch}.tar.gz" --dir "$tmp"
+tar -xzf "$tmp"/sccache_*.tar.gz -C "$tmp" sccache
+install -m 0755 "$tmp/sccache" "$HOME/.local/bin/sccache"
+rm -rf "$tmp"
+sccache --version
+```
+
+Make sure `~/.local/bin` is on your `PATH` (or change the `install`
+destination to a directory that is, e.g. `/usr/local/bin`).
+
+Prefer plain `curl`? The repo is private, so the request must be
+authenticated — reuse your `gh` token for the bearer header:
+
+```bash
+token=$(gh auth token)
+ver=0.15.2                                              # pick a released version
+os=$(uname -s | tr '[:upper:]' '[:lower:]')
+arch=$(uname -m); case "$arch" in x86_64) arch=amd64;; arm64|aarch64) arch=arm64;; esac
+asset="sccache_${ver}_${os}_${arch}.tar.gz"
+url=$(curl -fsSL -H "Authorization: Bearer $token" \
+  "https://api.github.com/repos/SafetyCulture/sccache/releases/tags/v${ver}" \
+  | jq -r --arg n "$asset" '.assets[]|select(.name==$n)|.url')
+curl -fsSL -H "Authorization: Bearer $token" -H "Accept: application/octet-stream" "$url" \
+  | tar -xz -C "$HOME/.local/bin" sccache
+sccache --version
+```
+
+(An anonymous `curl` to the release URL will **not** work — the repo is
+internal, so the asset needs the auth header above.)
+
 ---
 
 Usage
